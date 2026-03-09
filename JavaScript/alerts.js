@@ -25,6 +25,8 @@ const HomeControl = L.Control.extend({
 map.addControl(new HomeControl());
 
 const markers = {}; // שומר מרקרים כדי שלא נצייר אותם פעמיים
+const activeMarkers = {}; // Markers currently on map: {cityName: markerObject}
+let historyAlerts = [];
 
 // שלוחת חיפוש מיקומים
 const FALLBACK_CITIES = {
@@ -42,21 +44,38 @@ const FALLBACK_CITIES = {
 
 let cityData = FALLBACK_CITIES; // Start with fallback
 
+async function fetchWithProxy(targetUrl) {
+    const proxies = [
+        (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+        (url) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}&cache=${Date.now()}`
+    ];
+
+    for (const proxyGen of proxies) {
+        try {
+            const proxyUrl = proxyGen(targetUrl);
+            const response = await fetch(proxyUrl);
+            if (!response.ok) throw new Error("Proxy error");
+
+            const data = await response.json();
+            // allorigins wraps content in .contents, corsproxy returns raw
+            return data.contents ? JSON.parse(data.contents) : data;
+        } catch (e) {
+            console.warn(`Proxy failed for ${targetUrl}, trying next...`);
+        }
+    }
+    throw new Error("All proxies failed");
+}
+
 async function loadCities() {
     try {
         const targetUrl = "https://www.tzevaadom.co.il/static/cities.json?v=";
-        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}&cache=${Date.now()}`;
-
-        const response = await fetch(proxyUrl);
-        const data = await response.json();
-        const content = JSON.parse(data.contents);
+        const content = await fetchWithProxy(targetUrl);
 
         // Merge fallback with online data if successful
         cityData = { ...FALLBACK_CITIES, ...content.cities };
         console.log("נתוני ערים נטענו בהצלחה מהאינטרנט");
     } catch (e) {
         console.warn("שגיאה בטעינת נתונים מהאינטרנט (CORS/Proxy Error). משתמש בנתוני גיבוי (Fallback).", e);
-        // cityData remains as FALLBACK_CITIES
     }
 }
 
@@ -66,9 +85,9 @@ loadCities();
 let Alerts = [];
 const alertsList = document.getElementById('alerts-list');
 
-function handleRedAlert(cities, id) {
-    // הפיכה למערך אם זו עיר בודדת (תאימות לאחור)
+function handleRedAlert(cities, id, threatType = "צבע אדום", time = null) {
     const citiesArray = Array.isArray(cities) ? cities : [cities];
+    const alertTime = time || new Date().toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
     // פינוי מסך: אוטומציה לחלון שידורים מרחף (מצמיד אוטומטית אלא אם הוא חסום בנעילה 70%)
     const floatWin = document.getElementById('floating-channel-window');
@@ -89,14 +108,23 @@ function handleRedAlert(cities, id) {
 
     const cityCoords = [];
 
-    citiesArray.forEach(cityName => {
-        // הוספה לרשימה אם לא קיים כבר לאותו מזהה
-        if (!Alerts.some(a => a.id === id && a.title === cityName)) {
-            addAlertToUI(cityName);
-            console.log("התראה חדשה: " + cityName);
-            Alerts.push({ id, title: cityName });
+    // Handle UI Grouping
+    const alertTimeObj = {
+        id,
+        cities: citiesArray,
+        time: alertTime,
+        type: threatType,
+        timestamp: Date.now()
+    };
+    addAlertToUI(alertTimeObj, 'current');
 
-            const coords = updateMap(cityName);
+    citiesArray.forEach(cityName => {
+        // מניעת כפילויות של אותו מזהה ועיר באותו רגע
+        if (!Alerts.some(a => a.id === id && a.title === cityName)) {
+            Alerts.push({ id, title: cityName, time: alertTime, type: threatType, timestamp: Date.now() });
+            console.log(`התראה חדשה: ${cityName} (${threatType})`);
+
+            const coords = updateMap(cityName, 'current', threatType, alertTime);
             if (coords) cityCoords.push(coords);
         }
     });
@@ -104,22 +132,26 @@ function handleRedAlert(cities, id) {
     // הגדרת הזום בהתאם למספר אזורים שנמצאו
     if (cityCoords.length > 0) {
         if (cityCoords.length === 1) {
-            // זום קרוב עבור עיר בודדת
             map.flyTo(cityCoords[0], 12);
         } else {
-            // זום שמתאים לכל האזורים
             const bounds = L.latLngBounds(cityCoords);
             map.flyToBounds(bounds, { padding: [50, 50], maxZoom: 12 });
         }
-    } else {
-        // אין אזורים - זום אל כל ישראל
-        map.flyTo([31.5, 34.8], 8);
     }
 
-    // החזרה למצב רגיל אחרי 40 שניות
+    // החזרה למצב רגיל אחרי 60 שניות
     setTimeout(() => {
         document.body.style.setProperty('--background-color', '#121212');
-    }, 40000);
+        checkAndResetCamera();
+    }, 60000);
+}
+
+function checkAndResetCamera() {
+    // If no active markers remain on map, zoom out to Israel view
+    if (Object.keys(activeMarkers).length === 0) {
+        console.log("מנקה מבט: חוזר לתצוגת ישראל מלאה");
+        map.flyTo([31.5, 34.8], 8);
+    }
 }
 
 function triggerPersonalAlert(cityName) {
@@ -152,28 +184,105 @@ function triggerPersonalAlert(cityName) {
 window.simulateAlert = function () {
     const mockCities = ["תל אביב - יפו", "חיפה", "באר שבע", "ירושלים", "אשדוד", "שדרות", "אשקלון"];
     const target = localStorage.getItem('targetCity') || mockCities[Math.floor(Math.random() * mockCities.length)];
+    const threatCode = Math.floor(Math.random() * 3); // 0, 1, or 2
+    const threatName = getThreatName(threatCode);
 
-    console.warn("מפעיל סימולציה עבור: " + target);
-    handleRedAlert([target], "test-" + Date.now());
+    console.warn("מפעיל סימולציה עבור: " + target + " סוג: " + threatName);
+    handleRedAlert([target], "test-" + Date.now(), threatName);
 };
 
 window.simulateMultiAlert = function () {
-    handleRedAlert(["שדרות", "נתיבות", "אשקלון"], "test-multi-" + Date.now());
+    handleRedAlert(["שדרות", "נתיבות"], "test-multi-1-" + Date.now(), getThreatName(0));
+    setTimeout(() => {
+        handleRedAlert(["אשקלון", "זיקים"], "test-multi-2-" + Date.now(), getThreatName(0));
+    }, 2000);
 };
 
-function addAlertToUI(cityName) {
+function addAlertToUI(alert, section = 'current') {
     const alertsList = document.getElementById('alerts-list');
-    if (!alertsList) return; // לא בפאנל המתאים כרגע
+    if (!alertsList) return;
 
-    if (alertsList.innerHTML.includes("ממתין")) alertsList.innerHTML = "";
+    // Check if sections exist, if not create them
+    let currentSection = document.getElementById('section-current');
+    let historySection = document.getElementById('section-history');
+
+    if (!currentSection) {
+        alertsList.innerHTML = "";
+        const curTitle = document.createElement('div');
+        curTitle.className = 'alerts-section-title';
+        curTitle.innerText = 'התראות פעילות';
+        alertsList.appendChild(curTitle);
+        currentSection = document.createElement('div');
+        currentSection.id = 'section-current';
+        alertsList.appendChild(currentSection);
+
+        const histTitle = document.createElement('div');
+        histTitle.className = 'alerts-section-title';
+        histTitle.innerText = 'התראות בשעה האחרונה';
+        alertsList.appendChild(histTitle);
+        historySection = document.createElement('div');
+        historySection.id = 'section-history';
+        alertsList.appendChild(historySection);
+    }
+
+    const container = section === 'current' ? currentSection : historySection;
+    const citiesStr = Array.isArray(alert.cities) ? alert.cities.join(', ') : alert.title;
+
+    // --- Grouping Logic (3 mins) ---
+    const recentCard = Array.from(container.children).find(card => {
+        const cardTime = parseInt(card.dataset.timestamp);
+        const cardType = card.dataset.type;
+        return cardType === alert.type && Math.abs(alert.timestamp - cardTime) < 180000;
+    });
+
+    if (recentCard) {
+        const titleEl = recentCard.querySelector('.alert-title');
+        const currentCities = titleEl.innerText.split(', ');
+        const newCities = Array.isArray(alert.cities) ? alert.cities : [alert.title];
+
+        let updated = false;
+        newCities.forEach(c => {
+            if (!currentCities.includes(c)) {
+                currentCities.push(c);
+                updated = true;
+            }
+        });
+
+        if (updated) {
+            titleEl.innerText = currentCities.join(', ');
+        }
+        return;
+    }
 
     const div = document.createElement('div');
-    div.className = 'alert-card';
+    div.className = `alert-card ${section === 'history' ? 'history' : ''}`;
+    div.dataset.timestamp = alert.timestamp;
+    div.dataset.type = alert.type;
     div.innerHTML = `
-                <div style="font-weight: bold; font-size: 1.2em;">${cityName}</div>
-                <div style="font-size: 0.8em; color: #bbb;">${new Date().toLocaleTimeString('he-IL')}</div>
-            `;
-    alertsList.prepend(div);
+        <div class="alert-header">
+            <div class="alert-title">${citiesStr}</div>
+            <div class="alert-time">${alert.time}</div>
+        </div>
+        <div class="alert-type">${alert.type}</div>
+    `;
+
+    container.prepend(div);
+
+    if (section === 'current') {
+        // Move to history after 60 seconds
+        setTimeout(() => {
+            if (currentSection.contains(div)) {
+                currentSection.removeChild(div);
+                div.classList.add('history');
+                historySection.prepend(div);
+                // Grouping check again for the history section could be complex, 
+                // but usually the cards just move as they are.
+                if (historySection.children.length > 50) {
+                    historySection.removeChild(historySection.lastChild);
+                }
+            }
+        }, 60000);
+    }
 }
 
 // פונקציית עזר לריענון הרשימה כשעוברים ל-Mode 4
@@ -182,100 +291,186 @@ window.renderAllAlerts = function () {
     if (!alertsList) return;
 
     alertsList.innerHTML = "";
-    if (Alerts.length === 0) {
+    if (Alerts.length === 0 && historyAlerts.length === 0) {
         alertsList.innerHTML = '<p style="text-align: center; color: #666;">אין התראות כעת</p>';
         return;
     }
 
-    // מציג מהחדש לישן
-    [...Alerts].reverse().forEach(alert => {
-        const div = document.createElement('div');
-        div.className = 'alert-card';
-        // הערה: במציאות היינו שומרים גם את הזמן ב-Alerts, כרגע נשים זמן נוכחי או פשוט את השם
-        div.innerHTML = `
-            <div style="font-weight: bold; font-size: 1.2em;">${alert.title}</div>
-            <div style="font-size: 0.8em; color: #bbb;">צבא אדום (${new Date().toLocaleTimeString('he-IL')})</div>
-        `;
-        alertsList.appendChild(div);
-    });
+    // This will trigger the section creation and population
+    [...historyAlerts].forEach(a => addAlertToUI(a, 'history'));
+    [...Alerts].forEach(a => addAlertToUI(a, 'current'));
 };
 
-function updateMap(cityName) {
-    console.log(`DEBUG: updateMap called for: ${cityName}`);
+function updateMap(cityName, type = 'current', threatType = "צבע אדום", time = "") {
+    if (!cityData) return null;
 
-    if (!cityData) {
-        console.error("DEBUG: [MAP ERROR] cityData is NULL. Data was not loaded yet.");
-        return null;
-    }
-
-    let cityInfo = null;
-
-    // Structure 1: cityData is an object with city names as keys
-    if (cityData[cityName]) {
-        cityInfo = cityData[cityName];
-        console.log(`DEBUG: Found ${cityName} directly in object keys.`);
-    } else {
-        // Structure 2: cityData is an array of objects
+    let cityInfo = cityData[cityName];
+    if (!cityInfo) {
         const cityArray = Array.isArray(cityData) ? cityData : Object.values(cityData);
         cityInfo = cityArray.find(c => c.name === cityName || c.label === cityName || c.he === cityName);
-        if (cityInfo) console.log(`DEBUG: Found ${cityName} using fuzzy search in array.`);
     }
 
-    if (!cityInfo || !cityInfo.lat || !cityInfo.lng) {
-        console.warn(`DEBUG: [MAP ERROR] City "${cityName}" could not be located in database.`);
-        return null;
-    }
+    if (!cityInfo || !cityInfo.lat || !cityInfo.lng) return null;
 
     const coords = [cityInfo.lat, cityInfo.lng];
-    console.log(`DEBUG: [MAP SUCCESS] Marking ${cityName} at coords: ${coords}`);
 
-    // יצירת אייקון מותאם אישית מהבהב
+    // Grouping Logic: Check if there's already an active marker for this city
+    if (type === 'current' && activeMarkers[cityName]) {
+        const existingMarker = activeMarkers[cityName];
+        const currentPopup = existingMarker.getPopup().getContent();
+        if (!currentPopup.includes(threatType)) {
+            existingMarker.setPopupContent(`${currentPopup}<br>${threatType} (${time})`);
+        }
+        return coords;
+    }
+
+    if (type === 'history') {
+        addHistoryMarker(coords, cityName, threatType, time);
+        return coords;
+    }
+
+    // Current Alert Marker (Active)
     const pulseIcon = L.divIcon({
         className: 'custom-div-icon',
-        html: "<div class='alert-marker'></div>",
+        html: `<div class='alert-marker'></div>`,
         iconSize: [24, 24],
         iconAnchor: [12, 12]
     });
 
     try {
         const marker = L.marker(coords, { icon: pulseIcon }).addTo(map);
-        marker.bindPopup(`<b>צבע אדום: ${cityName}</b>`).openPopup();
+        marker.bindPopup(`<b>${threatType}: ${cityName}</b><br>${time}`).openPopup();
 
-        // הסרת המרקר אחרי 40 שניות
-        setTimeout(() => {
-            if (map.hasLayer(marker)) {
-                map.removeLayer(marker);
-                console.log(`DEBUG: Removed marker for ${cityName}`);
-            }
-        }, 40000);
+        if (type === 'current') {
+            activeMarkers[cityName] = marker;
+            // Remove after 60 seconds and potentially turn to history marker
+            setTimeout(() => {
+                if (map.hasLayer(marker)) {
+                    map.removeLayer(marker);
+                    delete activeMarkers[cityName];
+                    // Create a subtle history marker
+                    addHistoryMarker(coords, cityName, threatType, time);
+                    checkAndResetCamera();
+                }
+            }, 60000);
+        }
 
         return coords;
     } catch (err) {
-        console.error(`DEBUG: [MAP CRITICAL ERROR] Failed to add marker: ${err.message}`);
+        console.error(`DEBUG: [MAP ERROR] ${err.message}`);
         return null;
     }
+}
+
+function addHistoryMarker(coords, cityName, threatType, time) {
+    const hCircle = L.circle(coords, {
+        radius: 4000, // 4km larger area
+        fillColor: '#3052e7ff',
+        color: 'transparent',
+        weight: 0,
+        fillOpacity: 0.08, // Very faded
+        interactive: true
+    }).addTo(map);
+
+    hCircle.bindPopup(`<b>היסטוריה: ${threatType}</b><br>${cityName}<br>${time}`);
+
+    hCircle.on('mouseover', function () {
+        this.setStyle({ fillOpacity: 0.3 });
+    });
+    hCircle.on('mouseout', function () {
+        this.setStyle({ fillOpacity: 0.08 });
+    });
+
+    // History markers fade out after 10 minutes
+    setTimeout(() => {
+        if (map.hasLayer(hCircle)) map.removeLayer(hCircle);
+    }, 600000);
 }
 
 // --- 3. משיכת נתונים מה-API ---
 async function fetchAlerts() {
     try {
         const targetUrl = "https://api.tzevaadom.co.il/notifications";
-        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}&cache=${Date.now()}`;
-
-        const response = await fetch(proxyUrl);
-        const data = await response.json();
-        const content = JSON.parse(data.contents);
+        const content = await fetchWithProxy(targetUrl);
 
         if (Array.isArray(content) && content.length > 0) {
             content.forEach(alert => {
-                // מעבירים את כל הערים של ההתראה יחד לטיפול
-                handleRedAlert(alert.cities, alert.notificationId);
+                handleRedAlert(alert.cities, alert.notificationId, alert.threatType || "צבע אדום");
             });
         }
     } catch (e) {
-        console.log("סורק...");
+        // Silent
     }
     setTimeout(fetchAlerts, 2000);
+}
+
+function getThreatName(code) {
+    const threats = {
+        0: "ירי רקטות וטילים",
+        1: "חדירת כלי טיס עויין",
+        2: "חדירת מחבלים",
+        3: "רעידת אדמה",
+        4: "אירוע רדיולוגי",
+        5: "אירוע חומרים מסוכנים",
+        6: "צונאמי",
+        7: "אירוע בטחוני"
+    };
+    return threats[code] || "התראה";
+}
+
+async function fetchHistory() {
+    try {
+        const targetUrl = "https://api.tzevaadom.co.il/alerts-history/?";
+        const groupList = await fetchWithProxy(targetUrl);
+
+        if (Array.isArray(groupList)) {
+            const nowSeconds = Math.floor(Date.now() / 1000);
+            const oneHourAgo = nowSeconds - 3600;
+
+            // Sort groups so we process older groups first, then prepend their alerts (which results in newest at top)
+            // But actually, the API usually returns newest first. 
+            // Let's just process them and rely on 'historyAlerts' check.
+            groupList.forEach(group => {
+                if (!group.alerts || !Array.isArray(group.alerts)) return;
+
+                group.alerts.forEach((item, index) => {
+                    if (item.time < oneHourAgo) return; // Only last hour
+
+                    const alertDate = new Date(item.time * 1000);
+                    const timeStr = alertDate.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+                    const threatName = getThreatName(item.threat);
+
+                    // Pre-group UI call for history from API
+                    addAlertToUI({
+                        cities: item.cities,
+                        time: timeStr,
+                        type: threatName,
+                        timestamp: item.time * 1000
+                    }, 'history');
+
+                    item.cities.forEach(cityName => {
+                        const uniqueId = `hist-${group.id}-${index}-${cityName}`;
+
+                        if (!historyAlerts.some(a => a.id === uniqueId)) {
+                            const alertObj = {
+                                id: uniqueId,
+                                title: cityName,
+                                time: timeStr,
+                                type: threatName,
+                                timestamp: item.time * 1000
+                            };
+                            historyAlerts.push(alertObj);
+
+                            // subtle marker on map for history
+                            updateMap(cityName, 'history', threatName, timeStr);
+                        }
+                    });
+                });
+            });
+        }
+    } catch (e) {
+        console.error("History fetch error:", e);
+    }
 }
 
 // פונקציית בדיקה כפויה של המפה (עוקף את כל הלוגיקה של הערים)
@@ -301,3 +496,5 @@ window.forceMapMarker = function () {
 // Start the polling
 loadCities();
 fetchAlerts();
+fetchHistory();
+setInterval(fetchHistory, 300000); // Refresh history every 5 minutes
