@@ -1,5 +1,6 @@
 // --- 1. אתחול המפה ---
 const map = L.map('map').setView([31.5, 34.8], 8); // מרכז ישראל
+const version = "1.2";
 
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
     attribution: ''
