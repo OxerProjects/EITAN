@@ -87,6 +87,8 @@ function renderSettings() {
     const hMargin = localStorage.getItem('hMargin') || "0";
     const vMargin = localStorage.getItem('vMargin') || "0";
     const brightness = localStorage.getItem('brightness') || "100";
+    const soundEnabled = localStorage.getItem('soundEnabled') === "1";
+    const conflictName = localStorage.getItem('conflictName') || "";
 
     sideBox.innerHTML = `
         <div class="settings-container">
@@ -109,27 +111,43 @@ function renderSettings() {
             <div class="settings-section">
                 <h3><i class="fas fa-map-marker-alt"></i> התראות ממוקדות</h3>
                 <div class="setting-row">
-                    <label>אזור נוכחי למעקב</label>
+                    <label>אזור נוכחי למעקב (התראה אישית)</label>
                     <input type="text" id="target-city-input" value="${targetCity}" placeholder="הכנס שם עיר/אזור...">
                     <button class="settings-btn" id="save-target-btn">שמור מיקום</button>
                 </div>
             </div>
 
             <div class="settings-section">
-                <h3><i class="fas fa-chart-bar"></i> סטטיסטיקות וסטטוס</h3>
-                <div class="setting-row" style="font-size: 13px; color: #aaa;">
-                    <div>גרסת מערכת: <span style="color: var(--main-color);">1.0 (Stable)</span></div>
-                    <div>שטח פנוי בזיכרון: <span style="color: var(--main-color);">94%</span></div>
-                    <div>זמן ריצה רציף: <span id="uptime-display" style="color: var(--main-color);">00:00:00</span></div>
-                    <div>חיבור לשרת התראות: <span style="color: #4CAF50;">תקין</span></div>
-                    <div style="font-size: 10px; margin-top: 10px; color: #555; text-align: left; opacity: 0.6;">By OMER HACKMON</div>
+                <h3><i class="fas fa-bell"></i> חירום וסאונד</h3>
+                <div class="setting-row">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                        <input type="checkbox" id="sound-toggle" ${soundEnabled ? 'checked' : ''}
+                            style="width:16px;height:16px;accent-color:var(--cyan);"> צליל אזעקה + התראות דפדפן
+                    </label>
+                </div>
+                <div class="setting-row">
+                    <label>שם העימות הנוכחי (מוצג במסך הסטטיסטיקות)</label>
+                    <input type="text" id="conflict-name-input" value="${conflictName}" placeholder="לדוגמה: מבצע / מצב חירום...">
+                    <button class="settings-btn" id="save-conflict-btn">שמור</button>
                 </div>
             </div>
 
             <div class="settings-section">
-                <h3><i class="fas fa-vial"></i> סימולציה</h3>
+                <h3><i class="fas fa-circle-info"></i> מצב מערכת</h3>
+                <div class="setting-row" style="font-size: 13px; color: var(--text-dim);">
+                    <div>גרסת מערכת: <span style="color: var(--cyan);">${CONFIG.VERSION}</span></div>
+                    <div>זמן ריצה רציף: <span id="uptime-display" style="color: var(--cyan);">00:00:00</span></div>
+                    <div>מקור נתונים: <span style="color: var(--cyan);">Tzeva Adom (WebSocket + REST)</span></div>
+                    <div style="font-size: 10px; margin-top: 10px; color: var(--text-faint); text-align: left;">By OMER HACKMON</div>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h3><i class="fas fa-vial"></i> סימולציה ובדיקה</h3>
                 <button class="settings-btn btn-test" id="test-alert-btn">הפעל התראת בדיקה</button>
-                <button class="settings-btn" id="fix-map-btn" style="background: #1a3a3a; border-color: #1df7fa; margin-top: 10px;">בדוק סימון מפה</button>
+                <button class="settings-btn" id="test-multi-btn" style="margin-top: 10px;">סימולציית ריבוי אזורים</button>
+                <button class="settings-btn" id="fix-map-btn" style="margin-top: 10px;">בדוק סימון מפה</button>
+                <button class="settings-btn" id="replay-btn" style="margin-top: 10px;"><i class="fas fa-rotate-left"></i> ▶ הפעל ריפליי (שעה אחרונה)</button>
             </div>
         </div>
     `;
@@ -181,21 +199,54 @@ function renderSettings() {
     });
 
     testBtn.addEventListener('click', () => {
-        if (typeof simulateAlert === 'function') {
-            simulateAlert();
-        } else {
-            alert('מערכת הסימולציה לא זמינה כרגע.');
+        if (typeof simulateAlert === 'function') simulateAlert();
+        else alert('מערכת הסימולציה לא זמינה כרגע.');
+    });
+
+    const multiBtn = document.getElementById('test-multi-btn');
+    if (multiBtn) multiBtn.addEventListener('click', () => {
+        if (typeof simulateMultiAlert === 'function') simulateMultiAlert();
+    });
+
+    const replayBtn = document.getElementById('replay-btn');
+    if (replayBtn) replayBtn.addEventListener('click', () => {
+        if (window.replayHistory) window.replayHistory();
+    });
+
+    const fixMapBtnEl = document.getElementById('fix-map-btn');
+    if (fixMapBtnEl) fixMapBtnEl.addEventListener('click', () => {
+        if (window.forceMapMarker) window.forceMapMarker();
+        else alert('פונקציית הבדיקה לא זמינה.');
+    });
+
+    const soundToggle = document.getElementById('sound-toggle');
+    if (soundToggle) soundToggle.addEventListener('change', (e) => {
+        localStorage.setItem('soundEnabled', e.target.checked ? "1" : "0");
+        // Requesting notification permission requires a user gesture — do it here.
+        if (e.target.checked && 'Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission();
         }
     });
 
-    if (typeof fixMapBtn !== 'undefined' && fixMapBtn) {
-        fixMapBtn.addEventListener('click', () => {
-            if (window.forceMapMarker) {
-                window.forceMapMarker();
-            } else {
-                alert('פונקציית הבדיקה לא זמינה.');
-            }
+    const saveConflictBtn = document.getElementById('save-conflict-btn');
+    if (saveConflictBtn) saveConflictBtn.addEventListener('click', () => {
+        const name = document.getElementById('conflict-name-input').value.trim();
+        localStorage.setItem('conflictName', name);
+        alert('שם העימות נשמר.');
+    });
+
+    // Add a sound test button dynamically after the sound toggle row
+    const soundSection = document.getElementById('sound-toggle');
+    if (soundSection) {
+        const testSoundBtn = document.createElement('button');
+        testSoundBtn.className = 'settings-btn';
+        testSoundBtn.style.marginTop = '8px';
+        testSoundBtn.innerHTML = '<i class="fas fa-volume-high"></i> בדיקת סאונד';
+        testSoundBtn.addEventListener('click', () => {
+            if (window.EITAN_testSiren) window.EITAN_testSiren();
+            else alert('סאונד לא זמין — ייתכן שהדפדפן חסם אוטו-פליי.');
         });
+        soundSection.closest('.setting-row').appendChild(testSoundBtn);
     }
 
     // Apply existing
@@ -204,6 +255,10 @@ function renderSettings() {
 
 //---------------------------------------------------
 // TOP MENU CONTROLS & BOTTOM MENU:
+
+// Stats modal button
+const statsBtn = document.getElementById('stats-btn');
+if (statsBtn) statsBtn.addEventListener('click', () => { if (window.openStatsModal) window.openStatsModal(); });
 
 const mapOptionsBtn = document.getElementById('map-options-btn');
 const mapOptionsMenu = document.getElementById('map-options-menu');
@@ -520,4 +575,11 @@ function applyScreenSettings() {
 
 // Initial application on load
 applyScreenSettings();
+
+// Register service worker (PWA)
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
+}
 

@@ -1,169 +1,271 @@
-// הנחה: המשתנה 'map' מזוהה גלובלית מהקובץ alerts.js
+/* ==========================================================================
+ * EITAN — Map Layers
+ * Uses the global `map` created in alerts.js.
+ * Weather (RainViewer, animated), Flights (adsb.lol), Earthquakes (USGS),
+ * Satellite (Esri), Enemy borders (GeoJSON), Shelters (Overpass).
+ * ========================================================================== */
 
-// --- 1. שכבת מזג אוויר ורדאר (ענן ומכ"ם גשם) באמצעות RainViewer API חינמי ---
-let weatherLayer = null;
+/* ---- 1. Weather radar (RainViewer) — animated, fixed zoom -------------- */
+const Weather = {
+    frames: [],
+    layers: [],
+    idx: 0,
+    anim: null,
+    active: false,
 
-async function toggleWeather(show) {
-    if (show) {
+    async show() {
+        this.active = true;
         try {
-            // קבלת המידע העדכני ביותר על הרדאר מ-RainViewer
-            const response = await fetch('https://api.rainviewer.com/public/weather-maps.json');
-            const data = await response.json();
-            const lastObservation = data.radar.past[data.radar.past.length - 1]; // מצב הרדאר העדכני ביותר
+            const res = await fetch('https://api.rainviewer.com/public/weather-maps.json');
+            const data = await res.json();
+            const past = (data.radar && data.radar.past) || [];
+            const now = (data.radar && data.radar.nowcast) || [];
+            // last 6 past frames + nowcast = a short, smooth loop
+            this.frames = [...past.slice(-6), ...now].map(f => data.host + f.path);
+            if (!this.frames.length) return;
 
-            if (lastObservation) {
-                weatherLayer = L.tileLayer(`https://tilecache.rainviewer.com${lastObservation.path}/256/{z}/{x}/{y}/2/1_1.png`, {
-                    opacity: 0.6,
-                    zIndex: 10,
-                    attribution: 'Weather data © RainViewer'
-                }).addTo(map);
-            }
-        } catch (error) {
-            console.error("שגיאה בטעינת מכ\"ם מזג אוויר:", error);
+            this.layers = this.frames.map(path => L.tileLayer(
+                `${path}/256/{z}/{x}/{y}/2/1_1.png`,
+                {
+                    opacity: 0, zIndex: 200, tileSize: 256,
+                    maxNativeZoom: 7,    // RainViewer radar returns a "Zoom Level Not Supported"
+                    maxZoom: 19,         // placeholder beyond z7 — cap here so Leaflet upscales the real tile
+                    attribution: 'Radar © RainViewer'
+                }
+            ));
+            if (!this.active) return; // toggled off while loading
+            this.layers.forEach(l => l.addTo(map));
+            this.idx = this.layers.length - 1;
+            this.layers[this.idx].setOpacity(0.7);
+            this.startAnim();
+        } catch (e) {
+            console.error('שגיאה בטעינת רדאר מזג אוויר:', e);
         }
-    } else {
-        if (weatherLayer) {
-            map.removeLayer(weatherLayer);
-            weatherLayer = null;
-        }
+    },
+
+    startAnim() {
+        clearInterval(this.anim);
+        this.anim = setInterval(() => {
+            if (this.layers.length < 2) return;
+            this.layers[this.idx].setOpacity(0);
+            this.idx = (this.idx + 1) % this.layers.length;
+            // nowcast frames slightly brighter to hint "forecast"
+            this.layers[this.idx].setOpacity(0.7);
+        }, 600);
+    },
+
+    hide() {
+        this.active = false;
+        clearInterval(this.anim);
+        this.layers.forEach(l => { if (map.hasLayer(l)) map.removeLayer(l); });
+        this.layers = [];
+        this.frames = [];
     }
-}
+};
+function toggleWeather(show) { show ? Weather.show() : Weather.hide(); }
 
-// --- 2. שכבת מטוסים נוכחיים באמצעות OpenSky Network ---
-let flightMarkers = L.layerGroup();
-let flightInterval;
+/* ---- 2. Flights (adsb.lol — free, no key, CORS) — smooth tracking ------ */
+const Flights = {
+    group: L.layerGroup(),
+    markers: new Map(),   // hex -> { marker, missed }
+    timer: null,
+    active: false,
 
-async function fetchFlights() {
-    try {
-        // משיכת גבולות המפה הנוכחיים כדי להראות מטוסים בכל אזור בעולם שבו המשתמש מסתכל
-        const bounds = map.getBounds();
-        let lamin = bounds.getSouth();
-        let lomin = bounds.getWest();
-        let lamax = bounds.getNorth();
-        let lomax = bounds.getEast();
+    icon(track, color) {
+        return L.divIcon({
+            className: 'eitan-flight',
+            html: `<i class="fas fa-plane" style="transform:rotate(${(track || 0) - 45}deg);color:${color}"></i>`,
+            iconSize: [22, 22], iconAnchor: [11, 11]
+        });
+    },
 
-        // הגבלת הגבולות כדי למנוע שגיאות API אם מתרחקים יותר מדי בטעות
-        lamin = Math.max(-90, lamin); lamax = Math.min(90, lamax);
-        lomin = Math.max(-180, lomin); lomax = Math.min(180, lomax);
+    async fetch() {
+        try {
+            const c = map.getCenter();
+            const bounds = map.getBounds();
+            // radius = center -> NE corner, in nautical miles (capped by the API)
+            const meters = map.distance(c, bounds.getNorthEast());
+            const distNm = Math.min(Math.max(Math.round(meters / 1852), 25), CONFIG.FLIGHTS.max_dist_nm);
 
-        const response = await fetch(`https://opensky-network.org/api/states/all?lamin=${lamin}&lomin=${lomin}&lamax=${lamax}&lomax=${lomax}`);
+            const res = await fetch(CONFIG.FLIGHTS.api(c.lat, c.lng, distNm));
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const data = await res.json();
+            const planes = data.ac || data.aircraft || [];
 
-        if (!response.ok) {
-            throw new Error(`שגיאת רשת ${response.status}`);
-        }
+            // mark all as potentially gone, then refresh those we see
+            this.markers.forEach(m => m.missed++);
 
-        const data = await response.json();
-        flightMarkers.clearLayers(); // ניקוי מטוסים קודמים
+            planes.slice(0, 800).forEach(p => {
+                const lat = p.lat, lon = p.lon;
+                if (typeof lat !== 'number' || typeof lon !== 'number') return;
+                const hex = p.hex || p.r || (lat + ',' + lon);
+                const track = p.track != null ? p.track : (p.true_heading || 0);
+                const onGround = p.alt_baro === 'ground';
+                const color = onGround ? '#7a7a7a' : '#27e0ff';
 
-        if (data && data.states) {
-            // הגבלת כמות המטוסים שמוצגים כדי למנוע קריסה של הדפדפן אם מרחיקים את המפה לכלות העולם
-            const planesToShow = data.states.slice(0, 1500);
-
-            planesToShow.forEach(flight => {
-                const lon = flight[5];
-                const lat = flight[6];
-                const callsign = flight[1] ? flight[1].trim() : "לא ידוע";
-                const altitude = flight[7] || "לא ידוע";
-                const heading = flight[10] || 0; // כיוון טיסה
-                const speed = flight[9] ? Math.round(flight[9] * 3.6) : "לא ידוע"; // המרה מ מ/ש ל קמ"ש
-
-                if (lat && lon) {
-                    // אייקון שפונה לכיוון הטיסה
-                    const icon = L.divIcon({
-                        html: `<div style="transform: rotate(${heading - 45}deg);"><i class="fas fa-plane" style="color: #ffaa00; font-size: 20px; filter: drop-shadow(0px 0px 3px rgba(255, 170, 0, 0.8));"></i></div>`,
-                        iconSize: [24, 24],
-                        className: 'clear-flight-icon'
-                    });
-
-                    const marker = L.marker([lat, lon], { icon: icon })
-                        .bindPopup(`
-                            <div dir="rtl">
-                                <b>טיסה:</b> ${callsign}<br>
-                                <b>גובה:</b> ${altitude} מטר<br>
-                                <b>מהירות:</b> ${speed} קמ"ש
-                            </div>
-                        `);
-                    flightMarkers.addLayer(marker);
+                let entry = this.markers.get(hex);
+                if (entry) {
+                    entry.marker.setLatLng([lat, lon]);
+                    entry.marker.setIcon(this.icon(track, color));
+                    entry.missed = 0;
+                    const pop = entry.marker.getPopup();
+                    if (pop && pop.isOpen()) pop.setContent(this.popup(p));
+                } else {
+                    const marker = L.marker([lat, lon], { icon: this.icon(track, color) });
+                    marker.bindPopup(this.popup(p));
+                    this.group.addLayer(marker);
+                    this.markers.set(hex, { marker, missed: 0 });
                 }
             });
-        }
-    } catch (error) {
-        console.error("שגיאה בטעינת נתוני טיסות - הערה: OpenSky החינמי מאפשר משיכה מוגבלת מאוד של פעמים.", error);
-    }
-}
 
-function toggleFlights(show) {
-    if (show) {
-        map.addLayer(flightMarkers);
-        fetchFlights(); // טעינה ראשונית מיידית
-        flightInterval = setInterval(fetchFlights, 10000); // רענון כל 10 שניות
-    } else {
-        map.removeLayer(flightMarkers);
-        if (flightInterval) {
-            clearInterval(flightInterval);
+            // remove stale aircraft
+            for (const [hex, m] of this.markers) {
+                if (m.missed > CONFIG.FLIGHTS.stale_cycles) {
+                    this.group.removeLayer(m.marker);
+                    this.markers.delete(hex);
+                }
+            }
+        } catch (e) {
+            console.warn('שגיאה בטעינת מטוסים (adsb.lol):', e.message);
         }
-    }
-}
+    },
 
-// --- 3. שכבת רעידות אדמה עולמית באמצעות USGS API בזמן אמת ---
+    popup(p) {
+        const call = (p.flight || '').trim() || p.r || 'לא ידוע';
+        const alt = p.alt_baro === 'ground' ? 'על הקרקע' : ((p.alt_baro || p.alt_geom || '—') + ' רגל');
+        const spd = p.gs != null ? Math.round(p.gs) + ' קשר' : '—';
+        const type = p.desc || p.t || '—';
+        return `<div dir="rtl" class="flight-popup">
+            <b>✈ ${call}</b><br>
+            סוג: ${type} &nbsp; רישום: ${p.r || '—'}<br>
+            גובה: ${alt}<br>
+            מהירות: ${spd}</div>`;
+    },
+
+    show() {
+        this.active = true;
+        map.addLayer(this.group);
+        this.fetch();
+        this.timer = setInterval(() => this.fetch(), CONFIG.FLIGHTS.poll_ms);
+    },
+    hide() {
+        this.active = false;
+        clearInterval(this.timer);
+        map.removeLayer(this.group);
+        this.group.clearLayers();
+        this.markers.clear();
+    }
+};
+function toggleFlights(show) { show ? Flights.show() : Flights.hide(); }
+
+/* ---- 3. Earthquakes (USGS) — unchanged behavior ---------------------- */
 let earthQuakeLayer = L.layerGroup();
 let earthquakeInterval;
 
 async function fetchEarthquakes() {
     try {
-        const response = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson');
-        const data = await response.json();
-
+        const res = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson');
+        const data = await res.json();
         earthQuakeLayer.clearLayers();
-
         data.features.forEach(eq => {
-            const coords = eq.geometry.coordinates; // [lon, lat, depth]
-            const properties = eq.properties;
-            const mag = properties.mag;
-
-            // מראה רעידות אדמה בעלות עוצמה שמורגשת כדי לא להעמיס מדיי
-            if (mag >= 2.0) {
-                // דירוג צבע לפי עוצמה
-                let color = "#ffcc00"; // צהוב לחלש
-                if (mag >= 4.0) color = "#ff6600"; // כתום
-                if (mag >= 6.0) color = "#ff0000"; // אדום לחזק
-
-                const circle = L.circleMarker([coords[1], coords[0]], {
-                    radius: Math.max(mag * 2.5, 5),
-                    fillColor: color,
-                    color: color,
-                    weight: 1,
-                    opacity: 1,
-                    fillOpacity: 0.5
-                }).bindPopup(`
-                    <div dir="rtl">
-                        <b>עוצמה דרגה:</b> ${mag}<br>
-                        <b>מיקום:</b> ${properties.place}<br>
-                        <b>זמן:</b> ${new Date(properties.time).toLocaleString('he-IL')}
-                    </div>
-                `);
-
-                earthQuakeLayer.addLayer(circle);
-            }
+            const [lon, lat] = eq.geometry.coordinates;
+            const mag = eq.properties.mag;
+            if (mag < 2.0) return;
+            let color = '#ffcc00';
+            if (mag >= 4.0) color = '#ff6600';
+            if (mag >= 6.0) color = '#ff0000';
+            L.circleMarker([lat, lon], {
+                radius: Math.max(mag * 2.5, 5),
+                fillColor: color, color, weight: 1, opacity: 1, fillOpacity: 0.5
+            }).bindPopup(`<div dir="rtl"><b>עוצמה:</b> ${mag}<br><b>מיקום:</b> ${eq.properties.place}<br><b>זמן:</b> ${new Date(eq.properties.time).toLocaleString('he-IL')}</div>`)
+                .addTo(earthQuakeLayer);
         });
     } catch (e) {
-        console.error("שגיאה במשיכת נתוני רעידות אדמה", e);
+        console.error('שגיאה במשיכת רעידות אדמה', e);
     }
 }
-
 function toggleEarthquakes(show) {
     if (show) {
         map.addLayer(earthQuakeLayer);
-        fetchEarthquakes(); // קריאה ראשונית מופעלת מייד
-        // רענון אוטומטי מ- USGS
+        fetchEarthquakes();
         earthquakeInterval = setInterval(fetchEarthquakes, 5 * 60000);
     } else {
         map.removeLayer(earthQuakeLayer);
-        if (earthquakeInterval) clearInterval(earthquakeInterval);
+        clearInterval(earthquakeInterval);
     }
 }
 
-// --- מאזיני אירועים לתפריט ממשק ה-HTML ---
-document.getElementById('layer-weather').addEventListener('change', (e) => toggleWeather(e.target.checked));
-document.getElementById('layer-flights').addEventListener('change', (e) => toggleFlights(e.target.checked));
-document.getElementById('layer-earthquakes').addEventListener('change', (e) => toggleEarthquakes(e.target.checked));
+/* ---- 4. Satellite base (Esri World Imagery) -------------------------- */
+let satelliteLayer = null;
+function toggleSatellite(show) {
+    if (show) {
+        if (!satelliteLayer) satelliteLayer = L.tileLayer(CONFIG.TILES.satellite.url, { ...CONFIG.TILES.satellite.opts, zIndex: 50 });
+        satelliteLayer.addTo(map);
+    } else if (satelliteLayer) {
+        map.removeLayer(satelliteLayer);
+    }
+}
+
+/* ---- 5. Enemy borders (dim red) -------------------------------------- */
+let enemyLayer = null;
+async function toggleEnemy(show) {
+    if (show) {
+        if (!enemyLayer) {
+            try {
+                const res = await fetch(CONFIG.ENEMY.geojson);
+                const gj = await res.json();
+                const feats = gj.features.filter(f => CONFIG.ENEMY.countries.includes(f.properties.name));
+                enemyLayer = L.geoJSON({ type: 'FeatureCollection', features: feats }, {
+                    style: { color: '#ff3b3b', weight: 1, fillColor: '#ff3b3b', fillOpacity: 0.14 }
+                });
+                enemyLayer.bindPopup(l => `<b>${l.feature.properties.name}</b>`);
+            } catch (e) { console.error('שגיאה בטעינת גבולות', e); return; }
+        }
+        enemyLayer.addTo(map);
+    } else if (enemyLayer) {
+        map.removeLayer(enemyLayer);
+    }
+}
+
+/* ---- 6. Public shelters (Overpass, best-effort) ---------------------- */
+let shelterLayer = L.layerGroup();
+async function toggleShelters(show) {
+    if (!show) { map.removeLayer(shelterLayer); return; }
+    map.addLayer(shelterLayer);
+    if (map.getZoom() < 12) {
+        // avoid an enormous query — ask the user to zoom in
+        L.popup().setLatLng(map.getCenter())
+            .setContent('התקרב יותר (זום 12+) כדי לטעון מקלטים באזור').openOn(map);
+        return;
+    }
+    try {
+        const b = map.getBounds();
+        const bbox = `${b.getSouth()},${b.getWest()},${b.getNorth()},${b.getEast()}`;
+        const q = `[out:json][timeout:20];(node["amenity"="shelter"](${bbox});node["military"="bunker"](${bbox}););out 200;`;
+        const res = await fetch('https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(q));
+        const data = await res.json();
+        shelterLayer.clearLayers();
+        (data.elements || []).forEach(el => {
+            if (!el.lat || !el.lon) return;
+            L.marker([el.lat, el.lon], {
+                icon: L.divIcon({ className: 'eitan-shelter', html: '<i class="fas fa-house-circle-check"></i>', iconSize: [20, 20], iconAnchor: [10, 10] })
+            }).bindPopup(`<b>מקלט / מרחב מוגן</b><br>${(el.tags && (el.tags.name || el.tags['name:he'])) || 'ללא שם'}`)
+                .addTo(shelterLayer);
+        });
+        if (!(data.elements || []).length) {
+            L.popup().setLatLng(map.getCenter()).setContent('לא נמצאו מקלטים מתועדים באזור זה (כיסוי חלקי)').openOn(map);
+        }
+    } catch (e) { console.warn('שגיאה בטעינת מקלטים', e); }
+}
+
+/* ---- 7. Wire up the checkboxes (defensive: elements may not exist) ---- */
+function bindLayerToggle(id, fn) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', e => fn(e.target.checked));
+}
+bindLayerToggle('layer-weather', toggleWeather);
+bindLayerToggle('layer-flights', toggleFlights);
+bindLayerToggle('layer-earthquakes', toggleEarthquakes);
+bindLayerToggle('layer-satellite', toggleSatellite);
+bindLayerToggle('layer-enemy', toggleEnemy);
+bindLayerToggle('layer-shelters', toggleShelters);

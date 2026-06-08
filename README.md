@@ -1,43 +1,52 @@
-# EITAN_TEST Alert Map
+# EITAN 2.0 — מערכת התראות חירום
 
-This project displays real-time `Tzeva Adom` alerts on a Leaflet map.
-Because of CORS and tracking prevention, the client must fetch data from a local proxy.
+מערכת "חדר מצב" סטטית (HTML/CSS/JS, ללא שלב build) להצגת התראות צבע אדום בזמן אמת
+על מפת Leaflet, עם שכבות מפה, ערוצי שידור חיים, טיימר שהייה והתראה אישית.
+רצה כ-Static Site (למשל GitHub Pages) — אין שרת, אין מפתחות API.
 
-## Setup
+## הרצה מקומית
 
-1. Ensure you have Node.js installed (v14+ recommended).
-2. From the project root (`c:\PROJECTS\EITAN_TEST`), install dependencies:
-
-```sh
-npm install
-```
-
-3. Start the server:
+מכיוון שהאתר סטטי, כל שרת קבצים סטטי יספיק:
 
 ```sh
-npm start
+# Python
+python -m http.server 8000
+# או Node
+npx serve .
 ```
 
-The server will listen on `http://localhost:3000` by default. It serves:
+ואז לפתוח את `http://localhost:8000`.
 
-- `index.html` (map UI)
-- `/cities.json` (list of cities, downloaded from TzevaAdom)
-- `/notifications` (proxy to `https://api.tzevaadom.co.il/notifications` with CORS headers)
+> הערה: פתיחת `index.html` ישירות (file://) עלולה להיכשל בחלק מהבקשות. הריצו דרך שרת מקומי.
 
-## Usage
+## ארכיטקטורה
 
-- Open `http://localhost:3000` in your browser.
-- The page will automatically load the full cities list and poll for live notifications.
-- If the proxy fails repeatedly (e.g. no network), the client will switch to a simulation mode that generates random alerts every 10 seconds.
-- You can also manually trigger test alerts via the browser console:
+- `index.html` — מבנה הממשק.
+- `style.css` — ערכת Command-Center (design tokens, glassmorphism, רספונסיבי).
+- `cities.json` — מאגר ערים (שם → קואורדינטות + countdown), נטען מקומית ומתמזג עם המקור המקוון.
+- `JavaScript/config.js` — קונפיג מרכזי: endpoints, proxies, סוגי איום, זמני חיים, מקורות.
+- `JavaScript/alerts.js` — **AlertEngine**: מקור-אמת יחיד, רינדור אידמפוטנטי (ללא כפילויות),
+  WebSocket בזמן אמת (`wss://ws.tzevaadom.co.il`) עם נפילה אוטומטית ל-REST polling דרך CORS proxy.
+- `JavaScript/map.js` — שכבות מפה: מזג אוויר (RainViewer, מונפש), מטוסים (adsb.lol),
+  רעידות אדמה (USGS), לוויין (Esri), גבולות מדינות אויב, מקלטים (Overpass).
+- `JavaScript/media.js` — ממשק: פאנל צד, מצבים, ערוצים, טיימר, הגדרות.
+
+## בדיקה
+
+מתוך ה-console של הדפדפן:
 
 ```js
-simulateAlert();       // single random city
-simulateMultiAlert();  // up to 5 random cities
+simulateAlert();       // התראה בודדת (משתמש ב-targetCity אם הוגדר)
+simulateMultiAlert();  // כמה אזורים + סוגי איום
+forceMapMarker();      // סימון כפוי על תל אביב
 ```
 
-## Development Notes
+או דרך פאנל ההגדרות (אייקון הגלגל) ← "סימולציה ובדיקה".
 
-- The `cities.json` file is included in the repo. Run the `server.js` script periodically to refresh it if necessary.
-- You can add additional cities manually if needed.
-- To deploy on another host, update `server.js` or set the `PORT` environment variable.
+## הערות
+
+- מקור ההתראות הוא ה-API הלא-רשמי של צבע אדום (Tzeva Adom). בזמן אמת דרך WebSocket;
+  אם הוא חסום (CORS/Origin) המערכת עוברת אוטומטית ל-REST דרך proxy.
+- כל המקורות חינמיים וללא מפתח API.
+
+By OMER HACKMON

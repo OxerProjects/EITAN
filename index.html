@@ -3,16 +3,20 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EITAN</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+    <meta name="theme-color" content="#0a0e14">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="EITAN">
+    <link rel="manifest" href="manifest.json">
+    <title>EITAN — מערכת התראות</title>
 
     <!-- External Libraries -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;500;600;700;800&display=swap"
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;500;600;700;800&family=Heebo:wght@300;400;500;700;800;900&display=swap"
         rel="stylesheet" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
     <link rel="stylesheet" href="style.css">
 </head>
 
@@ -21,18 +25,32 @@
     <div class="header">
         <div class="header-controls">
             <div class="dropdown">
-                <button class="nav-btn" id="map-options-btn">אפשרויות מפה <i class="fas fa-chevron-down"></i></button>
+                <button class="nav-btn" id="map-options-btn"><i class="fas fa-layer-group"></i> שכבות מפה <i
+                        class="fas fa-chevron-down chevron"></i></button>
                 <div class="dropdown-content" id="map-options-menu">
-                    <label><input type="checkbox" id="layer-weather"> מזג אוויר</label>
-                    <label><input type="checkbox" id="layer-flights"> מעקב מטוסים</label>
-                    <label><input type="checkbox" id="layer-earthquakes"> מעקב רעידות אדמה</label>
+                    <label><input type="checkbox" id="layer-weather"> <i class="fas fa-cloud-rain"></i> מזג אוויר
+                        (רדאר)</label>
+                    <label><input type="checkbox" id="layer-flights"> <i class="fas fa-plane"></i> מעקב מטוסים</label>
+                    <label><input type="checkbox" id="layer-earthquakes"> <i class="fas fa-house-crack"></i> רעידות
+                        אדמה</label>
+                    <div class="dropdown-divider"></div>
+                    <label><input type="checkbox" id="layer-satellite"> <i class="fas fa-satellite"></i> תצוגת
+                        לוויין</label>
+                    <label><input type="checkbox" id="layer-enemy"> <i class="fas fa-flag"></i> גבולות מדינות
+                        אויב</label>
+                    <label><input type="checkbox" id="layer-shelters"> <i class="fas fa-house-circle-check"></i> מקלטים
+                        (חלקי)</label>
                 </div>
             </div>
-            <button class="nav-btn" id="channels-btn">ערוצים</button>
-            <button class="nav-btn" id="timer-btn">טיימר</button>
+            <button class="nav-btn" id="stats-btn"><i class="fas fa-chart-column"></i> סטטיסטיקות</button>
+            <button class="nav-btn" id="channels-btn"><i class="fas fa-tv"></i> ערוצים</button>
+            <button class="nav-btn" id="timer-btn"><i class="fas fa-stopwatch"></i> טיימר</button>
+        </div>
+        <div id="header-news-ticker">
+            <div id="header-ticker-track"></div>
         </div>
         <div class="logo-wrapper">
-            <h1 class="logo">EITAN 1.2</h1>
+            <h1 class="logo">EITAN<span class="logo-ver">2.0</span></h1>
             <span class="developer-credit">By OMER HACKMON</span>
         </div>
     </div>
@@ -43,20 +61,18 @@
                 <i class="fas fa-chevron-right"></i>
             </button>
             <div class="panel-header">
-                <h2 class="panel-title" id="title">מערכת התראות</h2>
+                <h2 class="panel-title" id="title"><i class="fas fa-tower-broadcast"></i> מערכת התראות</h2>
                 <div class="mode-selector">
-                    <button class="mode-btn active" title="מצב 1" id="mode-btn-1"><i
-                            class="fas fa-shield-alt"></i></button>
-                    <button class="mode-btn" title="מצב 2" id="mode-btn-2"><i
+                    <button class="mode-btn active" title="התראות" id="mode-btn-1"><i
+                            class="fas fa-shield-halved"></i></button>
+                    <button class="mode-btn" title="צופר" id="mode-btn-2"><i
                             class="fas fa-exclamation-triangle"></i></button>
-                    <button class="mode-btn" title="מצב 3" id="mode-btn-3"><i class="fas fa-newspaper"></i></button>
-                    <button class="mode-btn" title="מצב 4" id="mode-btn-4"><i class="fas fa-toggle-on"></i></button>
+                    <button class="mode-btn" title="חמ&quot;ל" id="mode-btn-3"><i class="fas fa-newspaper"></i></button>
+                    <button class="mode-btn" title="הגדרות" id="mode-btn-4"><i class="fas fa-gear"></i></button>
                 </div>
             </div>
             <div id="sideBox">
-                <div class="alerts-container" id="alerts-list">
-                    <p style="text-align: center; color: #666;">אין התראות כעת</p>
-                </div>
+                <div class="alerts-container" id="alerts-list"></div>
             </div>
         </div>
         <div id="map"></div>
@@ -94,10 +110,10 @@
         <!-- Personal Alert Popup Overlay -->
         <div id="personal-alert-popup" class="hidden">
             <div class="alert-content">
-                <i class="fas fa-exclamation-circle alert-icon-pulse"></i>
+                <i class="fas fa-triangle-exclamation alert-icon-pulse"></i>
                 <h2>התראה באזורך!</h2>
                 <h3 id="personal-alert-city-name"></h3>
-                <p>הכנס למרחב מוגן, טיימר 10 דקות הופעל.</p>
+                <p>היכנס/י למרחב מוגן. טיימר 10 דקות הופעל.</p>
                 <button id="close-personal-alert">הבנתי</button>
             </div>
         </div>
@@ -105,12 +121,12 @@
         <!-- Channels Bottom Menu -->
         <div id="channels-bottom-menu" class="bottom-menu modest">
             <div class="bottom-menu-header">
-                <h3>שידורים חיים</h3>
+                <h3><i class="fas fa-tv"></i> שידורים חיים</h3>
                 <button id="close-channels-btn"><i class="fas fa-times"></i></button>
             </div>
             <div class="bottom-menu-content">
-                <button class="channel-btn" data-url="11">11</button>
-                <button class="channel-btn" data-url="12">12</button>
+                <button class="channel-btn" data-url="11">כאן 11</button>
+                <button class="channel-btn" data-url="12">N12</button>
                 <button class="channel-btn" data-url="13">13</button>
                 <button class="channel-btn" data-url="14">14</button>
                 <button class="channel-btn" data-url="mamad"><i class="fas fa-bed"></i> ממ"ד</button>
@@ -123,15 +139,86 @@
         </div>
     </div>
 
-    <!-- Clock moved to bottom left -->
-    <div class="camera-info">
-        <p class="datetime"></p>
+    <!-- Bottom status bar -->
+    <div class="status-bar">
+        <div class="status-cluster">
+            <span class="status-item"><span class="live-dot"></span> <span id="status-source"
+                    class="status-warn">מתחבר…</span></span>
+            <span class="status-sep"></span>
+            <span class="status-item"><i class="fas fa-database"></i> צבע אדום API</span>
+        </div>
+        <div class="status-cluster">
+            <span class="status-item datetime-wrap"><i class="fas fa-clock"></i> <span class="datetime"></span></span>
+        </div>
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="JavaScript/alerts.js"></script>
-    <script src="JavaScript/media.js"></script>
-    <script src="JavaScript/map.js"></script>
+    <!-- Toast notifications container -->
+    <div id="toast-container"></div>
+
+    <script src="JavaScript/config.js?v=20260608c"></script>
+    <script src="JavaScript/alerts.js?v=20260608c"></script>
+    <script src="JavaScript/map.js?v=20260608c"></script>
+    <script src="JavaScript/media.js?v=20260608c"></script>
+    <script src="JavaScript/sound.js?v=20260608c"></script>
+    <script src="JavaScript/reports.js?v=20260608c"></script>
+    <script src="JavaScript/stats.js?v=20260608c"></script>
+
+    <!-- News ticker — always fresh (inline, not cached). Dual-path: direct RSS → rss2json fallback. -->
+    <script>
+    (function(){
+      function esc(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+      const SOURCES=[
+        {name:'N12',        rss:'https://rcs.mako.co.il/rss/news-israel.xml',      lang:'he'},
+        {name:'N12 ביטחון', rss:'https://rcs.mako.co.il/rss/news-military.xml',    lang:'he'},
+        {name:'וואלה',       rss:'https://rss.walla.co.il/feed/1?type=main',         lang:'he'},
+        {name:'ynet',       rss:'https://www.ynet.co.il/Integration/StoryRss2.xml', lang:'he'},
+        {name:'CNN',        rss:'https://rss.cnn.com/rss/edition_world.rss',         lang:'en'}
+      ];
+      function go(url,ms){const c=new AbortController();setTimeout(()=>c.abort(),ms);return fetch(url,{signal:c.signal});}
+      function xml2items(text,src){
+        const doc=new DOMParser().parseFromString(text,'text/xml');
+        return[...doc.querySelectorAll('item,entry')].slice(0,8).map(it=>({
+          source:src.name,lang:src.lang,
+          title:(it.querySelector('title')?.textContent||'').trim(),
+          link:(it.querySelector('link')?.getAttribute('href')||it.querySelector('link')?.textContent||'').trim(),
+          ts:new Date(it.querySelector('pubDate,published,updated')?.textContent||'').getTime()||Date.now()
+        })).filter(x=>x.title);
+      }
+      async function fetchSrc(src){
+        try{const r=await go(src.rss,5000);if(r.ok){const t=await r.text();if(t.trim()[0]==='<')return xml2items(t,src);}}catch(_){}
+        try{const r=await go('https://api.rss2json.com/v1/api.json?rss_url='+encodeURIComponent(src.rss),9000);
+          const d=await r.json();if(d.status==='ok')return(d.items||[]).slice(0,8).map(it=>({source:src.name,lang:src.lang,title:(it.title||'').trim(),link:it.link||'',ts:new Date(it.pubDate||'').getTime()||Date.now()})).filter(x=>x.title);}catch(_){}
+        return[];
+      }
+      async function load(){
+        const all=(await Promise.all(SOURCES.map(fetchSrc))).flat().sort((a,b)=>b.ts-a.ts);
+        if(!all.length)return;
+        // ---- Header ticker ----
+        const track=document.getElementById('header-ticker-track');
+        if(track){
+          const html=all.slice(0,16).map(n=>`<span class="hticker-item"><span class="hticker-src">${esc(n.source)}</span> ${esc(n.title)}</span>`).join('<span class="hticker-sep"> • </span>');
+          track.innerHTML=html+' <span class="hticker-sep">|</span> '+html;
+          // Apply animation inline so old cached CSS can't block it
+          track.style.display='inline-block';
+          track.style.whiteSpace='nowrap';
+          track.style.animation='tticker 120s linear infinite';
+        }
+        // ---- News pane inside reports panel ----
+        const pane=document.getElementById('tab-news');
+        if(pane){
+          pane.innerHTML=all.map(n=>{
+            const time=new Date(n.ts).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'});
+            const dir=n.lang==='en'?'ltr':'rtl';
+            return`<a class="news-item" href="${esc(n.link)}" target="_blank" rel="noopener"><div class="news-item-inner" dir="${dir}"><div class="news-item-top"><span class="news-src">${esc(n.source)}</span><span class="news-time">${time}</span></div><div class="news-title">${esc(n.title)}</div></div></a>`;
+          }).join('');
+        }
+      }
+      // Run after a short delay (works even if load event already fired)
+      setTimeout(load, 800);
+      setInterval(load, 180000);
+    })();
+    </script>
 </body>
 
 </html>
